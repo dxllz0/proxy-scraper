@@ -24,10 +24,10 @@ DEFAULTS = {
     "sources_path": "sources.json",
     "concurrency": 500,
     "timeout": 10,
-    "site": "https://api.ipify.org?format=json",    "output_dir": "output",
+    "site": "https://api.ipify.org?format=json",
+    "output_dir": "output",
 }
 
-# where the proxies come from
 DEFAULT_SOURCES = [
     {"name": "TheSpeedX HTTP", "url": "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt", "format": "text", "protocol": "http"},
     {"name": "TheSpeedX SOCKS4", "url": "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt", "format": "text", "protocol": "socks4"},
@@ -47,13 +47,10 @@ DEFAULT_SOURCES = [
 ]
 
 
-
-
 def config_path():
     return BASE_DIR / "config.json"
 
 
-# load settings or make them if missing
 def load_config(path=None):
     cfg = dict(DEFAULTS)
     cfg_file = Path(path) if path else config_path()
@@ -65,27 +62,23 @@ def load_config(path=None):
     except (json.JSONDecodeError, OSError):
         print("config is broken lol using defaults")
         return cfg
-    # only keep settings we know ignore the rest
     for k in data:
         if k in cfg:
             cfg[k] = data[k]
     return cfg
 
 
-# save settings to the file
 def save_config(cfg, path=None):
     cfg_file = Path(path) if path else config_path()
     cfg_file.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     return cfg_file
 
 
-# turns short paths into full ones
 def resolve(path_str):
     p = Path(path_str)
     return p if p.is_absolute() else BASE_DIR / p
 
 
-# load the sites or make the file if missing
 def load_sources(cfg):
     src_file = resolve(cfg["sources_path"])
     if not src_file.exists():
@@ -94,7 +87,6 @@ def load_sources(cfg):
     return json.loads(src_file.read_text(encoding="utf-8"))
 
 
-# finding proxies
 PROXY_RE = re.compile(
     r"(?:(?P<scheme>https?|socks4|socks5)://)?"
     r"(?P<ip>(?:\d{1,3}\.){3}\d{1,3})"
@@ -110,7 +102,6 @@ def _valid_ip(ip):
         return False
 
 
-# turn one regex hit into a proxy dict or nothing
 def _parse_match(match, default_protocol):
     ip = match.group("ip")
     port = int(match.group("port"))
@@ -124,7 +115,6 @@ def _parse_match(match, default_protocol):
     return {"ip": ip, "port": port, "protocol": scheme}
 
 
-# pull every ip port out of text skip dupes and fake ones
 def extract_proxies(text, default_protocol="http"):
     seen = set()
     found = []
@@ -140,12 +130,10 @@ def extract_proxies(text, default_protocol="http"):
     return found
 
 
-# normal list one ip port per line easy
 def parse_text(content, default_protocol="http"):
     return extract_proxies(content, default_protocol)
 
 
-# rip the text out of html then regex it
 def parse_html(content, default_protocol="http"):
     try:
         from bs4 import BeautifulSoup
@@ -153,7 +141,6 @@ def parse_html(content, default_protocol="http"):
         soup = BeautifulSoup(content, "html.parser")
         text = soup.get_text(separator="\n")
     except ImportError:
-        # no bs4 so just regex the raw html
         text = content
     return extract_proxies(text, default_protocol)
 
@@ -166,7 +153,6 @@ def parse_json(content, default_protocol="http"):
         return extract_proxies(content, default_protocol)
 
 
-# use your own regex if u passed one none means it flopped
 def _custom_parse(content, pattern, default_protocol):
     try:
         custom = re.compile(pattern, re.IGNORECASE)
@@ -193,7 +179,6 @@ def _custom_parse(content, pattern, default_protocol):
     return out
 
 
-# pick a parser or use your own regex if u want
 def parse_source(content, format="text", default_protocol="http", pattern=None):
     if pattern:
         custom = _custom_parse(content, pattern, default_protocol)
@@ -223,7 +208,6 @@ async def fetch_one(session, source, timeout=15):
     return proxies
 
 
-# download all the sites at the same time
 async def fetch_all(sources, timeout=15, on_source=None):
     proxies = []
     errors = []
@@ -262,12 +246,9 @@ async def fetch_all(sources, timeout=15, on_source=None):
     return proxies, errors
 
 
-# run a page through each proxy
-
 _TRANSPARENT_MARKERS = ("via", "x-forwarded-for", "proxy-connection", "forwarded")
 
 
-# windows asyncio keeps crying about closed connections
 def _quiet_loop():
     try:
         loop = asyncio.get_running_loop()
@@ -317,13 +298,11 @@ async def _try_proxy(proxy, site, timeout):
             return False, "unknown"
         return True, _guess_anonymity(dict(resp.headers))
     except Exception:
-        # dead proxy totally normal
         return False, "unknown"
     finally:
         await session.close()
 
 
-# try one proxy dead ones just come back alive false
 async def try_proxy(proxy, site, timeout, sem):
     async with sem:
         start = time.perf_counter()
@@ -342,7 +321,6 @@ async def try_proxy(proxy, site, timeout, sem):
         }
 
 
-# run them all quickest ones end up first
 async def validate_all(proxies, concurrency=500, timeout=10, site="https://api.ipify.org?format=json", on_result=None):
     sem = asyncio.Semaphore(max(1, concurrency))
     results = []
@@ -403,13 +381,11 @@ def upsert_proxies(proxies, path=None):
         for p in proxies
     ]
     with db:
-        # insert or just replace it if its already there
         db.executemany("INSERT OR REPLACE INTO proxies (ip, port, protocol, alive, latency_ms, anonymity, last_checked, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
     db.close()
     return len(rows)
 
 
-# good proxies quickest first
 def get_alive(protocol=None, path=None):
     db = get_db(path)
     db.row_factory = sqlite3.Row
@@ -426,7 +402,6 @@ def get_alive(protocol=None, path=None):
     return [dict(r) for r in rows]
 
 
-# everything in the db dead ones too
 def get_all(path=None):
     db = get_db(path)
     db.row_factory = sqlite3.Row
@@ -435,7 +410,6 @@ def get_all(path=None):
     return [dict(r) for r in rows]
 
 
-# numbers for the stats screen
 def get_stats(path=None):
     db = get_db(path)
     total = db.execute("SELECT COUNT(*) FROM proxies").fetchone()[0]
@@ -465,7 +439,6 @@ def get_stats(path=None):
     }
 
 
-# write working proxies to text files
 def export_files(output_dir="output"):
     out = resolve(str(output_dir))
     out.mkdir(parents=True, exist_ok=True)
@@ -485,7 +458,6 @@ def export_files(output_dir="output"):
     return written
 
 
-# short paths instead of giant ones
 def _rel(path):
     try:
         return str(Path(path).relative_to(BASE_DIR))
@@ -493,7 +465,6 @@ def _rel(path):
         return str(path)
 
 
-# dump the whole db to a txt file
 def dump_db_text(output_dir="output"):
     out = resolve(str(output_dir))
     out.mkdir(parents=True, exist_ok=True)
@@ -519,7 +490,6 @@ def dump_db_text(output_dir="output"):
     return dest
 
 
-# save everything print what got saved
 def _save_text_files(cfg):
     alive = get_alive()
     written = export_files(cfg["output_dir"])
@@ -534,10 +504,6 @@ def _save_text_files(cfg):
     print(f"  {_rel(dump)} ({len(get_all())} total rows in DB)")
 
 
-# menu stuff
-# pick a number then scrape then validate
-
-# the title thingy
 def show_banner():
     print("")
     print("======================================")
@@ -547,7 +513,6 @@ def show_banner():
     print("")
 
 
-# print menu return what u picked
 def show_menu():
     print("Main menu:")
     print("  1. Scrape proxies")
@@ -559,7 +524,6 @@ def show_menu():
     return Prompt.ask("Pick an option", choices=[str(i) for i in range(1, 6)], show_choices=False)
 
 
-# yes or no question
 def _confirm(message, default=True):
     try:
         return Confirm.ask(message, default=default)
@@ -567,7 +531,6 @@ def _confirm(message, default=True):
         return True if "exit" in message.lower() or "menu" in message.lower() else default
 
 
-# wait for enter so u can actually read stuff
 def _pause():
     try:
         input("Press Enter to go back...")
@@ -575,7 +538,6 @@ def _pause():
         pass
 
 
-# change settings they get saved
 def settings_screen(cfg):
     def _table():
         t = Table(title="Settings", box=box.ASCII)
@@ -620,7 +582,6 @@ def settings_screen(cfg):
     return cfg
 
 
-# step 1 download the lists into the db
 async def scrape_only_screen(console_, cfg):
     _quiet_loop()
     try:
@@ -652,7 +613,6 @@ async def scrape_only_screen(console_, cfg):
     print("Next: pick 2 to run them.")
 
 
-# step 2 run the proxies save the good ones
 async def validate_db_screen(console_, cfg):
     _quiet_loop()
     stored = get_all()
@@ -680,7 +640,6 @@ async def validate_db_screen(console_, cfg):
     _save_text_files(cfg)
 
 
-# show the numbers
 def stats_screen():
     stats = get_stats()
     print("")
@@ -719,7 +678,6 @@ def stats_screen():
         console.print(tab)
 
 
-# scrape but ctrl c just goes back
 def _run_scrape(cfg):
     try:
         asyncio.run(scrape_only_screen(console, cfg))
@@ -727,7 +685,6 @@ def _run_scrape(cfg):
         print("Cancelled - back to menu.")
 
 
-# same thing but for validate
 def _run_validate(cfg):
     try:
         asyncio.run(validate_db_screen(console, cfg))
@@ -735,7 +692,6 @@ def _run_validate(cfg):
         print("Cancelled - back to menu.")
 
 
-# run whatever got picked false means quit
 def _do_choice(choice, cfg):
     if choice == "1":
         _run_scrape(cfg)
@@ -755,11 +711,9 @@ def _do_choice(choice, cfg):
     return True
 
 
-# main loop ctrl c just goes back to menu
 def run_menu():
     cfg = load_config()
     while True:
-        # fresh screen every time cls is windows clear is everyone else
         os.system("cls" if os.name == "nt" else "clear")
         show_banner()
         try:
@@ -775,7 +729,6 @@ def run_menu():
             print("Cancelled - back to menu.")
             keep_going = True
         except Exception as exc:
-            # never crash just go back to menu
             print(f"Something went wrong: {exc}")
             print("Back to menu.")
             keep_going = True
