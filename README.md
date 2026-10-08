@@ -38,7 +38,7 @@ sources.json ──► scrape (async) ──► parse + dedupe ──► validat
 Requires Python 3.10+.
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/dxllz0/proxy-scraper.git
 cd proxy-scraper
 python -m venv .venv
 # Windows:
@@ -61,8 +61,8 @@ full dump of the database (`all_proxies.txt`).
 You will see a banner and a numbered menu:
 
 ```
-[1] Scrape proxies (step 1)
-[2] Validate proxies (step 2, saves text files)
+[1] Scrape proxies
+[2] Validate proxies
 [3] View stats
 [4] Settings
 [5] Exit
