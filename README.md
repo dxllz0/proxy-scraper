@@ -41,12 +41,6 @@ sources.json ──► scrape (async) ──► parse + dedupe ──► validat
 |---|---|---|
 | `docs/screenshots/menu.png` | `docs/screenshots/live.png` | `docs/screenshots/results.png` |
 
-![Main menu](docs/screenshots/menu.png)
-![Live validation](docs/screenshots/live.png)
-![Results](docs/screenshots/results.png)
-
-GIF demo: `docs/demo.gif`
-
 ## Install
 
 Requires Python 3.10+.
