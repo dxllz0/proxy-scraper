@@ -33,14 +33,6 @@ sources.json ──► scrape (async) ──► parse + dedupe ──► validat
                                               export ──► output/*.txt + proxies.json
 ```
 
-## Screenshots
-
-> Placeholders — replace with your own captures.
-
-| Main menu | Live progress | Results |
-|---|---|---|
-| `docs/screenshots/menu.png` | `docs/screenshots/live.png` | `docs/screenshots/results.png` |
-
 ## Install
 
 Requires Python 3.10+.
