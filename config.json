@@ -1,0 +1,7 @@
+{
+  "sources_path": "sources.json",
+  "concurrency": 500,
+  "timeout": 10,
+  "site": "https://api.ipify.org?format=json",
+  "output_dir": "output"
+}
