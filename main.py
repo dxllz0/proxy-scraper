@@ -2,7 +2,6 @@ import asyncio
 import json
 import os
 import re
-import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,27 +23,10 @@ DEFAULTS = {
     "sources_path": "sources.json",
     "concurrency": 500,
     "timeout": 10,
+    "tcp_timeout": 3,
     "site": "https://api.ipify.org?format=json",
     "output_dir": "output",
 }
-
-DEFAULT_SOURCES = [
-    {"name": "TheSpeedX HTTP", "url": "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt", "format": "text", "protocol": "http"},
-    {"name": "TheSpeedX SOCKS4", "url": "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt", "format": "text", "protocol": "socks4"},
-    {"name": "TheSpeedX SOCKS5", "url": "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt", "format": "text", "protocol": "socks5"},
-    {"name": "ShiftyTR HTTP", "url": "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt", "format": "text", "protocol": "http"},
-    {"name": "ShiftyTR SOCKS4", "url": "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks4.txt", "format": "text", "protocol": "socks4"},
-    {"name": "ShiftyTR SOCKS5", "url": "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt", "format": "text", "protocol": "socks5"},
-    {"name": "monosans HTTP", "url": "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt", "format": "text", "protocol": "http"},
-    {"name": "monosans SOCKS4", "url": "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks4.txt", "format": "text", "protocol": "socks4"},
-    {"name": "monosans SOCKS5", "url": "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt", "format": "text", "protocol": "socks5"},
-    {"name": "clarketm HTTP", "url": "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt", "format": "text", "protocol": "http"},
-    {"name": "openproxylist HTTPS", "url": "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt", "format": "text", "protocol": "http"},
-    {"name": "openproxylist SOCKS4", "url": "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS4_RAW.txt", "format": "text", "protocol": "socks4"},
-    {"name": "openproxylist SOCKS5", "url": "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5_RAW.txt", "format": "text", "protocol": "socks5"},
-    {"name": "FreeProxyList.net", "url": "https://free-proxy-list.net/", "format": "html", "protocol": "http"},
-    {"name": "Spys.one", "url": "https://spys.one/en/free-proxy-list/", "format": "html", "protocol": "http"},
-]
 
 
 def config_path():
@@ -60,7 +42,7 @@ def load_config(path=None):
     try:
         data = json.loads(cfg_file.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        print("config is broken lol using defaults")
+        print("config is broken, using defaults")
         return cfg
     for k in data:
         if k in cfg:
@@ -81,9 +63,6 @@ def resolve(path_str):
 
 def load_sources(cfg):
     src_file = resolve(cfg["sources_path"])
-    if not src_file.exists():
-        src_file.write_text(json.dumps(DEFAULT_SOURCES, indent=2), encoding="utf-8")
-        return list(DEFAULT_SOURCES)
     return json.loads(src_file.read_text(encoding="utf-8"))
 
 
@@ -157,7 +136,7 @@ def _custom_parse(content, pattern, default_protocol):
     try:
         custom = re.compile(pattern, re.IGNORECASE)
     except re.error:
-        print("custom regex is broken using normal parser instead")
+        print("custom regex is broken, using normal parser instead")
         return None
     seen = set()
     out = []
@@ -211,14 +190,17 @@ async def fetch_one(session, source, timeout=15):
 async def fetch_all(sources, timeout=15, on_source=None):
     proxies = []
     errors = []
-    headers = {"User-Agent": "Mozilla/5.0 (just a kid learning python)"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"}
 
     async def _notify(name, ok, info):
         if on_source is None:
             return
-        result = on_source(name, ok, info)
-        if asyncio.iscoroutine(result):
-            await result
+        try:
+            result = on_source(name, ok, info)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            pass
 
     async with aiohttp.ClientSession(headers=headers) as session:
 
@@ -256,8 +238,14 @@ def _quiet_loop():
         return
     prev = loop.get_exception_handler()
 
+    suppress = (ConnectionResetError, ConnectionAbortedError, ConnectionRefusedError, TimeoutError)
+    try:
+        suppress = suppress + (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError)
+    except AttributeError:
+        pass
+
     def _handle(loop, context):
-        if isinstance(context.get("exception"), ConnectionResetError):
+        if isinstance(context.get("exception"), suppress):
             return
         if prev is not None:
             prev(loop, context)
@@ -278,36 +266,66 @@ def _proxy_url(proxy):
     return f"{proxy['protocol']}://{proxy['ip']}:{proxy['port']}"
 
 
-async def _try_proxy(proxy, site, timeout):
-    timeout_cfg = aiohttp.ClientTimeout(total=timeout)
-    socks = proxy.get("protocol", "http") in ("socks4", "socks5")
-    if socks:
-        from aiohttp_socks import ProxyConnector
-
-        connector = ProxyConnector.from_url(_proxy_url(proxy))
-        session = aiohttp.ClientSession(connector=connector, timeout=timeout_cfg)
-    else:
-        session = aiohttp.ClientSession(timeout=timeout_cfg)
+async def _tcp_open(ip, port, timeout=3):
     try:
-        if socks:
-            resp = await session.get(site)
-        else:
-            resp = await session.get(site, proxy=_proxy_url(proxy))
+        conn = asyncio.open_connection(ip, int(port))
+        reader, writer = await asyncio.wait_for(conn, timeout=timeout)
+        try:
+            writer.close()
+            try:
+                await asyncio.wait_for(writer.wait_closed(), timeout=1)
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+async def _http_check_shared(session, proxy_url, site, timeout):
+    resp = await session.get(site, proxy=proxy_url, timeout=aiohttp.ClientTimeout(total=timeout))
+    await resp.read()
+    if resp.status >= 400:
+        return False, "unknown"
+    return True, _guess_anonymity(dict(resp.headers))
+
+
+async def _socks_check(proxy_url, site, timeout):
+    from aiohttp_socks import ProxyConnector
+
+    connector = ProxyConnector.from_url(proxy_url)
+    session = aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=timeout))
+    try:
+        resp = await session.get(site)
         await resp.read()
         if resp.status >= 400:
             return False, "unknown"
         return True, _guess_anonymity(dict(resp.headers))
-    except Exception:
-        return False, "unknown"
     finally:
         await session.close()
 
 
-async def try_proxy(proxy, site, timeout, sem):
+async def _try_proxy(proxy, site, timeout, http_session=None, tcp_timeout=3):
+    if not await _tcp_open(proxy["ip"], proxy["port"], timeout=tcp_timeout):
+        return False, "unknown"
+    try:
+        if proxy.get("protocol", "http") in ("socks4", "socks5"):
+            return await _socks_check(_proxy_url(proxy), site, timeout)
+        if http_session is None:
+            timeout_cfg = aiohttp.ClientTimeout(total=timeout)
+            async with aiohttp.ClientSession(timeout=timeout_cfg) as session:
+                return await _http_check_shared(session, _proxy_url(proxy), site, timeout)
+        return await _http_check_shared(http_session, _proxy_url(proxy), site, timeout)
+    except Exception:
+        return False, "unknown"
+
+
+async def try_proxy(proxy, site, timeout, sem, http_session=None, tcp_timeout=3):
     async with sem:
         start = time.perf_counter()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        alive, anon = await _try_proxy(proxy, site, timeout)
+        alive, anon = await _try_proxy(proxy, site, timeout, http_session, tcp_timeout)
         ms = int((time.perf_counter() - start) * 1000) if alive else -1
         return {
             "ip": proxy["ip"],
@@ -321,121 +339,153 @@ async def try_proxy(proxy, site, timeout, sem):
         }
 
 
-async def validate_all(proxies, concurrency=500, timeout=10, site="https://api.ipify.org?format=json", on_result=None):
+def _normalize_sites(site):
+    if isinstance(site, (list, tuple)):
+        sites = [s for s in site if s]
+        return sites or ["https://api.ipify.org?format=json"]
+    if isinstance(site, str) and "," in site:
+        sites = [s.strip() for s in site.split(",") if s.strip()]
+        return sites or [site]
+    return [site]
+
+
+async def validate_all(proxies, concurrency=500, timeout=10, site="https://api.ipify.org?format=json", on_result=None, tcp_timeout=3):
+    import itertools
+
+    if not proxies:
+        return []
+    sites = _normalize_sites(site)
+    site_cycle = itertools.cycle(sites)
     sem = asyncio.Semaphore(max(1, concurrency))
     results = []
 
-    async def _one(proxy):
-        res = await try_proxy(proxy, site, timeout, sem)
-        results.append(res)
-        if on_result is not None:
-            out = on_result(res)
-            if asyncio.iscoroutine(out):
-                await out
-        return res
+    connector = aiohttp.TCPConnector(limit=max(1, concurrency), limit_per_host=0, ttl_dns_cache=300)
+    timeout_cfg = aiohttp.ClientTimeout(total=timeout, connect=min(5, timeout))
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout_cfg) as http_session:
+        async def run_cb(r):
+            if not on_result:
+                return
+            x = on_result(r)
+            if asyncio.iscoroutine(x):
+                await x
 
-    await asyncio.gather(*[_one(p) for p in proxies])
+        async def do_one(p):
+            s = next(site_cycle)
+            r = await try_proxy(p, s, timeout, sem, http_session, tcp_timeout)
+            results.append(r)
+            await run_cb(r)
+
+        async def check_many(chunk):
+            for p in chunk:
+                await do_one(p)
+
+        workers_n = min(max(1, concurrency), len(proxies))
+        chunks = [proxies[i::workers_n] for i in range(workers_n)]
+        await asyncio.gather(*[asyncio.create_task(check_many(c)) for c in chunks])
+
     results.sort(key=lambda r: (not r["alive"], r["latency_ms"] if r["alive"] else 10**9))
     return results
 
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS proxies (
-    ip TEXT NOT NULL,
-    port INTEGER NOT NULL,
-    protocol TEXT NOT NULL DEFAULT 'http',
-    alive INTEGER NOT NULL DEFAULT 0,
-    latency_ms INTEGER NOT NULL DEFAULT -1,
-    anonymity TEXT NOT NULL DEFAULT 'unknown',
-    last_checked TEXT NOT NULL DEFAULT '',
-    source TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY (ip, port, protocol)
-);
-"""
-
-DB_FILE = BASE_DIR / "proxies.db"
+STORE_FILE = BASE_DIR / "output" / "proxies.json"
 
 
-def get_db(path=None):
-    db = sqlite3.connect(str(path or DB_FILE))
-    db.execute(SCHEMA)
-    db.commit()
-    return db
+def _store_path(cfg_or_path=None):
+    if cfg_or_path is None:
+        return STORE_FILE
+    if isinstance(cfg_or_path, dict):
+        return resolve(cfg_or_path["output_dir"]) / "proxies.json"
+    return resolve(str(cfg_or_path)) / "proxies.json"
 
 
-def upsert_proxies(proxies, path=None):
+def load_store(path=None):
+    p = Path(path) if path else STORE_FILE
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return data
+    except (json.JSONDecodeError, OSError):
+        pass
+    return []
+
+
+def save_store(rows, path=None):
+    p = Path(path) if path else STORE_FILE
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+    return p
+
+
+def upsert_proxies(proxies, cfg_or_path=None):
     if not proxies:
         return 0
-    db = get_db(path)
-    rows = [
-        (
-            p["ip"],
-            p["port"],
-            p.get("protocol", "http"),
-            1 if p.get("alive") else 0,
-            p.get("latency_ms", -1),
-            p.get("anonymity", "unknown"),
-            p.get("last_checked", ""),
-            p.get("source", ""),
-        )
-        for p in proxies
-    ]
-    with db:
-        db.executemany("INSERT OR REPLACE INTO proxies (ip, port, protocol, alive, latency_ms, anonymity, last_checked, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
-    db.close()
-    return len(rows)
+    path = _store_path(cfg_or_path)
+    existing = load_store(path)
+    index = {(r["ip"], r["port"], r.get("protocol", "http")): r for r in existing}
+
+    for p in proxies:
+        key = (p["ip"], p["port"], p.get("protocol", "http"))
+        row = {
+            "ip": p["ip"],
+            "port": p["port"],
+            "protocol": p.get("protocol", "http"),
+            "alive": bool(p.get("alive", False)),
+            "latency_ms": p.get("latency_ms", -1),
+            "anonymity": p.get("anonymity", "unknown"),
+            "last_checked": p.get("last_checked", ""),
+            "source": p.get("source", ""),
+        }
+        index[key] = row
+
+    merged = list(index.values())
+    save_store(merged, path)
+    return len(proxies)
 
 
-def get_alive(protocol=None, path=None):
-    db = get_db(path)
-    db.row_factory = sqlite3.Row
+def get_all(cfg_or_path=None):
+    return load_store(_store_path(cfg_or_path))
+
+
+def get_alive(protocol=None, cfg_or_path=None):
+    rows = [r for r in get_all(cfg_or_path) if r.get("alive")]
     if protocol:
-        rows = db.execute(
-            "SELECT * FROM proxies WHERE alive=1 AND protocol=? ORDER BY latency_ms",
-            (protocol,),
-        ).fetchall()
-    else:
-        rows = db.execute(
-            "SELECT * FROM proxies WHERE alive=1 ORDER BY latency_ms"
-        ).fetchall()
-    db.close()
-    return [dict(r) for r in rows]
+        rows = [r for r in rows if r.get("protocol") == protocol]
+    rows.sort(key=lambda r: r.get("latency_ms", 10**9))
+    return rows
 
 
-def get_all(path=None):
-    db = get_db(path)
-    db.row_factory = sqlite3.Row
-    rows = db.execute("SELECT * FROM proxies").fetchall()
-    db.close()
-    return [dict(r) for r in rows]
-
-
-def get_stats(path=None):
-    db = get_db(path)
-    total = db.execute("SELECT COUNT(*) FROM proxies").fetchone()[0]
-    alive = db.execute("SELECT COUNT(*) FROM proxies WHERE alive=1").fetchone()[0]
+def get_stats(cfg_or_path=None):
+    rows = get_all(cfg_or_path)
+    total = len(rows)
+    alive = sum(1 for r in rows if r.get("alive"))
     by_protocol = {}
-    for protocol, alive_n, total_n in db.execute(
-        "SELECT protocol, SUM(alive), COUNT(*) FROM proxies GROUP BY protocol"
-    ).fetchall():
-        by_protocol[protocol] = {"alive": alive_n or 0, "total": total_n}
-    buckets = {"<500ms": 0, "500-1500ms": 0, "1500-3000ms": 0, ">3000ms": 0}
-    for (lat,) in db.execute("SELECT latency_ms FROM proxies WHERE alive=1").fetchall():
+    for r in rows:
+        proto = r.get("protocol", "http")
+        bucket = by_protocol.setdefault(proto, {"alive": 0, "total": 0})
+        bucket["total"] += 1
+        if r.get("alive"):
+            bucket["alive"] += 1
+    latency_buckets = {"<500ms": 0, "500-1500ms": 0, "1500-3000ms": 0, ">3000ms": 0}
+    for r in rows:
+        if not r.get("alive"):
+            continue
+        lat = r.get("latency_ms", -1)
         if lat < 500:
-            buckets["<500ms"] += 1
+            latency_buckets["<500ms"] += 1
         elif lat < 1500:
-            buckets["500-1500ms"] += 1
+            latency_buckets["500-1500ms"] += 1
         elif lat < 3000:
-            buckets["1500-3000ms"] += 1
+            latency_buckets["1500-3000ms"] += 1
         else:
-            buckets[">3000ms"] += 1
-    db.close()
+            latency_buckets[">3000ms"] += 1
     return {
         "total": total,
         "alive": alive,
         "dead": total - alive,
         "by_protocol": by_protocol,
-        "latency_buckets": buckets,
+        "latency_buckets": latency_buckets,
     }
 
 
@@ -444,14 +494,14 @@ def export_files(output_dir="output"):
     out.mkdir(parents=True, exist_ok=True)
     written = {}
     for protocol in ("http", "socks4", "socks5"):
-        rows = get_alive(protocol)
+        rows = get_alive(protocol, output_dir)
         dest = out / f"{protocol}.txt"
         dest.write_text(
             "\n".join(f"{r['ip']}:{r['port']}" for r in rows) + ("\n" if rows else ""),
             encoding="utf-8",
         )
         written[protocol] = dest
-    all_alive = get_alive()
+    all_alive = get_alive(None, output_dir)
     dest_json = out / "proxies.json"
     dest_json.write_text(json.dumps(all_alive, indent=2), encoding="utf-8")
     written["json"] = dest_json
@@ -468,12 +518,12 @@ def _rel(path):
 def dump_db_text(output_dir="output"):
     out = resolve(str(output_dir))
     out.mkdir(parents=True, exist_ok=True)
-    rows = get_all()
+    rows = get_all(output_dir)
     rows.sort(
         key=lambda r: (
             r.get("protocol", ""),
             0 if r.get("alive") else 1,
-            r.get("latency_ms", -1),
+            r.get("latency_ms", -1) if r.get("alive") else 10**9,
         )
     )
     dest = out / "all_proxies.txt"
@@ -491,9 +541,9 @@ def dump_db_text(output_dir="output"):
 
 
 def _save_text_files(cfg):
-    alive = get_alive()
+    alive = get_alive(None, cfg)
     written = export_files(cfg["output_dir"])
-    print("Saved:")
+    print("saved:")
     for label, path in written.items():
         if label == "json":
             print(f"  {_rel(path)} ({len(alive)} proxies)")
@@ -501,7 +551,7 @@ def _save_text_files(cfg):
             n = sum(1 for r in alive if r["protocol"] == label)
             print(f"  {_rel(path)} ({n} proxies)")
     dump = dump_db_text(cfg["output_dir"])
-    print(f"  {_rel(dump)} ({len(get_all())} total rows in DB)")
+    print(f"  {_rel(dump)} ({len(get_all(cfg))} total rows)")
 
 
 def show_banner():
@@ -528,7 +578,7 @@ def _confirm(message, default=True):
     try:
         return Confirm.ask(message, default=default)
     except EOFError:
-        return True if "exit" in message.lower() or "menu" in message.lower() else default
+        return default
 
 
 def _pause():
@@ -546,8 +596,9 @@ def settings_screen(cfg):
         t.add_row("1. sources_path", cfg["sources_path"])
         t.add_row("2. concurrency", str(cfg["concurrency"]))
         t.add_row("3. timeout (s)", str(cfg["timeout"]))
-        t.add_row("4. site", cfg["site"])
+        t.add_row("4. site", str(cfg["site"]))
         t.add_row("5. output_dir", cfg["output_dir"])
+        t.add_row("6. tcp_timeout (s)", str(cfg.get("tcp_timeout", 3)))
         return t
 
     console.print(Panel(_table(), box=box.ASCII))
@@ -570,14 +621,16 @@ def settings_screen(cfg):
                 cfg["site"] = Prompt.ask("site", default=cfg["site"])
             elif choice == "5":
                 cfg["output_dir"] = Prompt.ask("output_dir", default=cfg["output_dir"])
+            elif choice == "6":
+                cfg["tcp_timeout"] = int(Prompt.ask("tcp_timeout (seconds)", default=str(cfg.get("tcp_timeout", 3))))
             else:
-                print("thats not a setting lol, try 1-5")
+                print("thats not a setting, try 1-6")
                 continue
         except (EOFError, ValueError) as exc:
             print(f"nah that didnt work ({exc}), nothing changed")
             continue
         save_config(cfg)
-        print("Saved.")
+        print("saved.")
         console.print(Panel(_table(), box=box.ASCII))
     return cfg
 
@@ -596,7 +649,7 @@ async def scrape_only_screen(console_, cfg):
         try:
             scraped, errors = await fetch_all(sources, timeout=cfg["timeout"], on_source=on_source)
         except KeyboardInterrupt:
-            print("Scrape cancelled, back to menu.")
+            print("scrape cancelled, back to menu")
             return
     unchecked = [
         {"ip": p["ip"], "port": p["port"], "protocol": p.get("protocol", "http"),
@@ -604,20 +657,20 @@ async def scrape_only_screen(console_, cfg):
          "last_checked": "", "source": p.get("source", "")}
         for p in scraped
     ]
-    upsert_proxies(unchecked)
+    upsert_proxies(unchecked, cfg)
     print(f"Scraped {len(scraped)} proxies from {len(sources)} sources.")
     for e in errors:
         print(f"! {e[:160]}")
     dump = dump_db_text(cfg["output_dir"])
-    print(f"Full DB saved to: {_rel(dump)} ({len(get_all())} rows)")
+    print(f"Full list saved to: {_rel(dump)} ({len(get_all(cfg))} rows)")
     print("Next: pick 2 to run them.")
 
 
 async def validate_db_screen(console_, cfg):
     _quiet_loop()
-    stored = get_all()
+    stored = get_all(cfg)
     if not stored:
-        print("DB is empty. Use option 1 (Scrape) first.")
+        print("no proxies yet, go do option 1 first")
         return
     print(f"Running {len(stored)} saved proxies... (go grab a snack, this takes a while)")
     with Progress() as progress:
@@ -630,18 +683,19 @@ async def validate_db_screen(console_, cfg):
             results = await validate_all(
                 stored, concurrency=cfg["concurrency"], timeout=cfg["timeout"],
                 site=cfg["site"], on_result=on_result,
+                tcp_timeout=cfg.get("tcp_timeout", 3),
             )
         except KeyboardInterrupt:
-            print("Validation cancelled, back to menu.")
+            print("validation cancelled, back to menu")
             return
-    upsert_proxies(results)
+    upsert_proxies(results, cfg)
     alive = sum(1 for r in results if r["alive"])
     print(f"{alive}/{len(results)} alive.")
     _save_text_files(cfg)
 
 
-def stats_screen():
-    stats = get_stats()
+def stats_screen(cfg):
+    stats = get_stats(cfg)
     print("")
     print("Overview:")
     print(f"  Total: {stats['total']}   Alive: {stats['alive']}   Dead: {stats['dead']}")
@@ -656,7 +710,7 @@ def stats_screen():
             proto.add_row(name, str(vals["alive"]), str(vals["total"]))
         console.print(proto)
     else:
-        print("No data yet. go scrape something first (option 1)")
+        print("no data yet, go scrape something first (option 1)")
     print("")
 
     lat = Table(title="Latency distribution (alive only)", box=box.ASCII)
@@ -666,7 +720,7 @@ def stats_screen():
         lat.add_row(bucket, str(count))
     console.print(lat)
 
-    top = get_alive()[:5]
+    top = get_alive(None, cfg)[:5]
     if top:
         print("")
         tab = Table(title="Top 5 quickest", box=box.ASCII)
@@ -682,14 +736,14 @@ def _run_scrape(cfg):
     try:
         asyncio.run(scrape_only_screen(console, cfg))
     except KeyboardInterrupt:
-        print("Cancelled - back to menu.")
+        print("cancelled, back to menu")
 
 
 def _run_validate(cfg):
     try:
         asyncio.run(validate_db_screen(console, cfg))
     except KeyboardInterrupt:
-        print("Cancelled - back to menu.")
+        print("cancelled, back to menu")
 
 
 def _do_choice(choice, cfg):
@@ -700,13 +754,13 @@ def _do_choice(choice, cfg):
         _run_validate(cfg)
         return True
     if choice == "3":
-        stats_screen()
+        stats_screen(cfg)
         return True
     if choice == "4":
         settings_screen(cfg)
         return True
-    if _confirm("Really exit?", default=True):
-        print("Bye!")
+    if _confirm("really exit?", default=True):
+        print("bye!")
         return False
     return True
 
@@ -720,21 +774,22 @@ def run_menu():
             choice = show_menu()
         except (KeyboardInterrupt, EOFError):
             print("")
-            print("Bye!")
+            print("bye!")
             break
         os.system("cls" if os.name == "nt" else "clear")
         try:
             keep_going = _do_choice(choice, cfg)
         except (KeyboardInterrupt, EOFError):
-            print("Cancelled - back to menu.")
+            print("cancelled, back to menu")
             keep_going = True
         except Exception as exc:
-            print(f"Something went wrong: {exc}")
-            print("Back to menu.")
+            print(f"oops something broke: {exc}")
+            print("back to menu")
             keep_going = True
         if not keep_going:
             break
         _pause()
 
 
-run_menu()
+if __name__ == '__main__':
+    run_menu()
